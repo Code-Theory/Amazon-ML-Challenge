@@ -1,4 +1,9 @@
-from mlchallenge.normalization import candidate_text, compact_text, digit_set, normalize_text
+from mlchallenge.normalization import (
+    candidate_text,
+    compact_text,
+    digit_set,
+    normalize_text,
+)
 
 
 def test_normalization_is_unicode_preserving_and_deterministic() -> None:

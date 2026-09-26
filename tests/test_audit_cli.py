@@ -24,6 +24,16 @@ def test_loaders_and_audit_report(dataset_root) -> None:
     assert all(len(item["sha256"]) == 64 for item in report["files"].values())
 
 
+def test_fast_audit_skips_hashing_and_reports_progress(dataset_root) -> None:
+    progress: list[str] = []
+    report = audit_data(dataset_root, include_hashes=False, progress=progress.append)
+
+    assert report["hashing_enabled"] is False
+    assert all(item["sha256"] is None for item in report["files"].values())
+    assert progress[0].startswith("Audit: loading")
+    assert progress[-1].startswith("Audit: report complete")
+
+
 def test_cli_audit_make_folds_and_preflight(dataset_root, tmp_path, capsys) -> None:
     audit_path = tmp_path / "reports" / "audit.json"
     assert (

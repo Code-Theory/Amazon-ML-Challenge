@@ -9,8 +9,13 @@ from mlchallenge.candidates import (
     CandidateConfig,
     blocking_diagnostics,
     generate_candidates,
+    prepare_candidate_text_cache,
 )
-from mlchallenge.features import FEATURE_COLUMNS, build_pair_features
+from mlchallenge.features import (
+    FEATURE_COLUMNS,
+    build_pair_features,
+    prepare_pair_feature_cache,
+)
 from mlchallenge.modeling import (
     BaselineMatcher,
     ModelConfig,
@@ -27,6 +32,17 @@ def test_candidates_do_not_hard_filter_unseen_country(synthetic_frames) -> None:
         frames["source3"],
         CandidateConfig(top_k_per_source=2, max_features=None),
     )
+    config = CandidateConfig(top_k_per_source=2, max_features=None)
+    cached_candidates = generate_candidates(
+        frames["source1"],
+        frames["source2"],
+        frames["source3"],
+        config,
+        text_cache=prepare_candidate_text_cache(
+            frames["source1"], frames["source2"], frames["source3"], config
+        ),
+    )
+    pd.testing.assert_frame_equal(candidates, cached_candidates)
     france_candidates = candidates.loc[candidates["source1_entity_id"] == "S1-003"]
     assert set(france_candidates["candidate_source"]) == {"source2", "source3"}
     assert "S2-104" in set(france_candidates["candidate_entity_id"])
@@ -44,6 +60,14 @@ def test_features_labels_model_and_blocking_diagnostics(synthetic_frames) -> Non
     features = build_pair_features(
         candidates, frames["source1"], frames["source2"], frames["source3"]
     )
+    cached_features = build_pair_features(
+        candidates,
+        frames["source1"],
+        frames["source2"],
+        frames["source3"],
+        cache=prepare_pair_feature_cache(frames["source1"], frames["source2"], frames["source3"]),
+    )
+    pd.testing.assert_frame_equal(features, cached_features)
     assert tuple(features.columns[2:]) == FEATURE_COLUMNS
     assert np.isfinite(features.loc[:, FEATURE_COLUMNS].to_numpy()).all()
     labels = label_candidate_pairs(features, frames["truth"])

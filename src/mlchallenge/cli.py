@@ -95,7 +95,11 @@ def _doctor(args: argparse.Namespace) -> int:
 
 def _audit(args: argparse.Namespace) -> int:
     config = _config(args)
-    report = audit_data(_data_root(args, config))
+    report = audit_data(
+        _data_root(args, config),
+        include_hashes=not args.skip_hashes,
+        progress=logging.getLogger(__name__).info,
+    )
     output = args.output or str(Path(config.paths.report_dir) / "data_audit.json")
     write_audit(report, output)
     print(json.dumps(report, indent=2, sort_keys=True))
@@ -224,6 +228,11 @@ def build_parser() -> argparse.ArgumentParser:
     audit_parser = subparsers.add_parser("audit", help="validate and fingerprint challenge data")
     _common(audit_parser)
     audit_parser.add_argument("--output", default=None)
+    audit_parser.add_argument(
+        "--skip-hashes",
+        action="store_true",
+        help="skip SHA-256 hashing for a faster exploratory audit",
+    )
     audit_parser.set_defaults(func=_audit)
 
     folds_parser = subparsers.add_parser(

@@ -39,3 +39,24 @@ def test_threshold_selection_prefers_higher_threshold_on_tie() -> None:
     assert threshold == 0.8
     assert score == 1.0
     assert len(table) == 2
+
+
+def test_fast_threshold_selection_matches_direct_metric_with_duplicate_pairs() -> None:
+    scored = pd.DataFrame(
+        [
+            ("S1-1", "S2-1", 0.20),
+            ("S1-1", "S2-1", 0.90),
+            ("S1-1", "S2-9", 0.60),
+            ("S1-2", "S3-8", 0.40),
+        ],
+        columns=("source1_entity_id", "candidate_entity_id", "score"),
+    )
+    truth = {"S1-1": {"S2-1"}, "S1-2": set(), "S1-3": {"S3-missing"}}
+    thresholds = [0.3, 0.5, 0.8]
+
+    _, _, table = tune_threshold_from_oof(scored, truth, thresholds)
+    expected = [
+        macro_entity_fbeta(predictions_at_threshold(scored, truth, threshold), truth, beta=0.5)
+        for threshold in thresholds
+    ]
+    assert table["macro_f0_5"].tolist() == pytest.approx(expected)

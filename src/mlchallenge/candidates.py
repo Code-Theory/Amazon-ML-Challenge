@@ -10,7 +10,7 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.neighbors import NearestNeighbors
 
 from mlchallenge.contracts import truth_mapping
-from mlchallenge.normalization import candidate_text, normalize_text
+from mlchallenge.normalization import normalize_text
 
 BLOCKING_SCORE_COLUMNS = (
     "combined_blocking_score",
@@ -62,36 +62,98 @@ class CandidateConfig:
         return ("combined",)
 
 
-def _text_series(frame: pd.DataFrame, view: str) -> pd.Series:
-    if view == "combined":
-        values = [
-            candidate_text(row.business_name, row.business_address) for row in frame.itertuples()
-        ]
-    elif view == "name":
-        values = frame["business_name"].map(normalize_text).tolist()
-    elif view == "address":
-        values = frame["business_address"].map(normalize_text).tolist()
-    else:  # pragma: no cover - guarded by CandidateConfig.views
-        raise ValueError(f"unknown retrieval view: {view}")
-    return pd.Series(
-        values,
-        index=frame.index,
-        dtype="string",
+@dataclass(frozen=True)
+class CandidateTextCache:
+    """Row-local normalized retrieval text reusable across CV partitions."""
+
+    views: tuple[str, ...]
+    source1: pd.DataFrame
+    source2: pd.DataFrame
+    source3: pd.DataFrame
+
+
+def _text_views(frame: pd.DataFrame, views: tuple[str, ...]) -> dict[str, pd.Series]:
+    """Build requested retrieval views while normalizing each field only once."""
+
+    requested = set(views)
+    names = frame["business_name"].map(normalize_text) if requested & {"combined", "name"} else None
+    addresses = (
+        frame["business_address"].map(normalize_text)
+        if requested & {"combined", "address"}
+        else None
     )
+    result: dict[str, pd.Series] = {}
+    if "combined" in requested:
+        assert names is not None and addresses is not None
+        values = [
+            "" if not name and not address else f"name {name} address {address}".strip()
+            for name, address in zip(names, addresses, strict=True)
+        ]
+        result["combined"] = pd.Series(values, index=frame.index, dtype="string")
+    if "name" in requested:
+        assert names is not None
+        result["name"] = names.astype("string")
+    if "address" in requested:
+        assert addresses is not None
+        result["address"] = addresses.astype("string")
+    return result
+
+
+def _indexed_text_views(frame: pd.DataFrame, views: tuple[str, ...]) -> pd.DataFrame:
+    text = _text_views(frame, views)
+    return pd.DataFrame(
+        {view: text[view].to_numpy() for view in views},
+        index=pd.Index(frame["entity_id"].astype(str), name="entity_id"),
+    )
+
+
+def prepare_candidate_text_cache(
+    source1: pd.DataFrame,
+    source2: pd.DataFrame,
+    source3: pd.DataFrame,
+    config: CandidateConfig,
+) -> CandidateTextCache:
+    """Normalize retrieval text once; these row-local transforms cannot leak fold labels."""
+
+    return CandidateTextCache(
+        views=config.views,
+        source1=_indexed_text_views(source1, config.views),
+        source2=_indexed_text_views(source2, config.views),
+        source3=_indexed_text_views(source3, config.views),
+    )
+
+
+def _select_cached_views(
+    cache: pd.DataFrame,
+    frame: pd.DataFrame,
+    views: tuple[str, ...],
+) -> dict[str, pd.Series]:
+    entity_ids = frame["entity_id"].astype(str)
+    positions = cache.index.get_indexer(entity_ids)
+    if (positions < 0).any():
+        missing = entity_ids.iloc[np.flatnonzero(positions < 0)].tolist()
+        raise ValueError(f"candidate text cache is missing entity IDs: {missing[:10]}")
+    selected = cache.iloc[positions]
+    return {
+        view: pd.Series(selected[view].to_numpy(), index=frame.index, dtype="string")
+        for view in views
+    }
 
 
 def _candidates_for_view(
     source1: pd.DataFrame,
     targets: pd.DataFrame,
     *,
+    query_text: pd.Series,
+    target_text: pd.Series,
     target_source: str,
     view: str,
     config: CandidateConfig,
 ) -> pd.DataFrame:
     if source1.empty or targets.empty:
         return pd.DataFrame(columns=CANDIDATE_COLUMNS)
-    target_text = _text_series(targets, view).fillna("")
-    query_text = _text_series(source1, view).fillna("")
+    target_text = target_text.fillna("")
+    query_text = query_text.fillna("")
     target_mask = target_text.ne("").to_numpy()
     query_mask = query_text.ne("").to_numpy()
     if not target_mask.any() or not query_mask.any():
@@ -153,6 +215,8 @@ def generate_candidates(
     source2: pd.DataFrame,
     source3: pd.DataFrame,
     config: CandidateConfig,
+    *,
+    text_cache: CandidateTextCache | None = None,
 ) -> pd.DataFrame:
     """Retrieve top-k candidates independently from Sources 2 and 3.
 
@@ -160,20 +224,35 @@ def generate_candidates(
     avoids assuming that labels are complete/consistent and supports unseen country strings.
     """
 
-    result = pd.concat(
-        [
+    if text_cache is not None and text_cache.views != config.views:
+        raise ValueError(
+            f"candidate text cache contains views {text_cache.views}; expected {config.views}"
+        )
+    query_views = (
+        _select_cached_views(text_cache.source1, source1, config.views)
+        if text_cache is not None
+        else _text_views(source1, config.views)
+    )
+    parts: list[pd.DataFrame] = []
+    for target_source, targets in (("source2", source2), ("source3", source3)):
+        target_views = (
+            _select_cached_views(getattr(text_cache, target_source), targets, config.views)
+            if text_cache is not None
+            else _text_views(targets, config.views)
+        )
+        parts.extend(
             _candidates_for_view(
                 source1,
                 targets,
+                query_text=query_views[view],
+                target_text=target_views[view],
                 target_source=target_source,
                 view=view,
                 config=config,
             )
-            for target_source, targets in (("source2", source2), ("source3", source3))
             for view in config.views
-        ],
-        ignore_index=True,
-    )
+        )
+    result = pd.concat(parts, ignore_index=True)
     if result.empty:
         return pd.DataFrame(columns=CANDIDATE_COLUMNS)
     result = result.groupby(

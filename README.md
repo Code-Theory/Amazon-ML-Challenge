@@ -52,6 +52,7 @@ Important behavior:
 
 ```text
 configs/
+  fast_dev.toml                 # quick structural smoke test; not for model selection
   baseline.toml                 # corrected single-view logistic baseline
   multiview_logistic.toml       # candidate-generation/feature ablation
   multiview_histgb.toml         # nonlinear matcher candidate
@@ -137,11 +138,37 @@ Audit the official data before modeling:
 .\.venv\Scripts\python.exe -m mlchallenge audit --config configs\baseline.toml
 ```
 
+The audit reports progress for every major stage. For a quick exploratory pass, add
+`--skip-hashes` to avoid rereading all TSV files for SHA-256 fingerprints. Keep hashing enabled
+for recorded experiments so their exact input files remain traceable.
+
 Run leakage-resistant nested cross-validation:
 
 ```powershell
 .\.venv\Scripts\python.exe -m mlchallenge cross-validate --config configs\baseline.toml
 ```
+
+For a faster end-to-end structural check before committing to the full nested CV run:
+
+```powershell
+.\.venv\Scripts\python.exe -m mlchallenge cross-validate --config configs\fast_dev.toml
+```
+
+`fast_dev.toml` deliberately uses fewer folds, candidates, vocabulary features, and threshold
+points. It is for debugging only; do not compare its score with the full experiment configs.
+
+Linux/WSL equivalent:
+
+```bash
+cd '/mnt/d/Amazon ML challenge/MLChall-main/MLChall-main'
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -e '.[dev]'
+python -m mlchallenge cross-validate --config configs/fast_dev.toml
+```
+
+For better WSL disk performance, copy the repository to `~/MLChall-main` before running full CV.
 
 Fit the fold ensemble and frozen deployment threshold:
 

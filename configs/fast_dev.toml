@@ -1,0 +1,37 @@
+# Fast structural smoke-test configuration. Do not use its CV score for model selection.
+
+[paths]
+data_root = "data"
+report_dir = "reports/fast_dev"
+artifact_dir = "artifacts/fast_dev"
+output_dir = "output/fast_dev"
+
+[candidate_generation]
+method = "combined_char_tfidf"
+top_k_per_source = 20
+max_candidates_per_source = 20
+analyzer = "char_wb"
+ngram_min = 2
+ngram_max = 5
+min_df = 1
+max_features = 150000
+n_jobs = -1
+
+[validation]
+n_outer_splits = 2
+n_inner_splits = 2
+seed = 20260925
+metric = "macro_f0.5"
+
+[model]
+family = "logistic_regression"
+class_weight = "balanced"
+max_iter = 500
+regularization_c = 1.0
+entity_balanced_weights = true
+
+[threshold_selection]
+strategy = "inner_oof_grid"
+minimum = 0.05
+maximum = 0.95
+steps = 41

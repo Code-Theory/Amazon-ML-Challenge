@@ -16,12 +16,19 @@ import pandas as pd
 
 from mlchallenge.candidates import (
     CandidateConfig,
+    CandidateTextCache,
     blocking_diagnostics,
     generate_candidates,
+    prepare_candidate_text_cache,
 )
 from mlchallenge.config import ExperimentConfig, set_global_seed
 from mlchallenge.contracts import TrainingData, truth_mapping
-from mlchallenge.features import FEATURE_COLUMNS, build_pair_features
+from mlchallenge.features import (
+    FEATURE_COLUMNS,
+    PairFeatureCache,
+    build_pair_features,
+    prepare_pair_feature_cache,
+)
 from mlchallenge.folds import build_fold_manifest, select_fold_partition
 from mlchallenge.metrics import (
     entity_fbeta,
@@ -88,28 +95,55 @@ def _partition_training(
 def _candidate_features(
     data: TrainingData,
     candidate_config: CandidateConfig,
+    feature_cache: PairFeatureCache | None = None,
+    text_cache: CandidateTextCache | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
+    started = time.perf_counter()
     candidates = generate_candidates(
         data.source1,
         data.source2,
         data.source3,
         candidate_config,
+        text_cache=text_cache,
     )
-    features = build_pair_features(candidates, data.source1, data.source2, data.source3)
+    candidate_seconds = time.perf_counter() - started
+    features = build_pair_features(
+        candidates,
+        data.source1,
+        data.source2,
+        data.source3,
+        n_jobs=candidate_config.n_jobs,
+        cache=feature_cache,
+    )
+    LOGGER.info(
+        "prepared candidate_pairs=%d candidate_seconds=%.2f feature_seconds=%.2f",
+        len(candidates),
+        candidate_seconds,
+        time.perf_counter() - started - candidate_seconds,
+    )
     return candidates, features
 
 
-def _fit(data: TrainingData, config: ExperimentConfig) -> tuple[PairMatcher, int, int]:
-    candidates, features = _candidate_features(data, config.candidates)
+def _fit(
+    data: TrainingData,
+    config: ExperimentConfig,
+    feature_cache: PairFeatureCache | None = None,
+    text_cache: CandidateTextCache | None = None,
+) -> tuple[PairMatcher, int, int]:
+    candidates, features = _candidate_features(data, config.candidates, feature_cache, text_cache)
     labels = label_candidate_pairs(features, data.ground_truth)
     matcher = build_matcher(config.model).fit(features, labels)
     return matcher, len(candidates), len(features)
 
 
 def _score(
-    matcher: PairMatcher, data: TrainingData, config: ExperimentConfig
+    matcher: PairMatcher,
+    data: TrainingData,
+    config: ExperimentConfig,
+    feature_cache: PairFeatureCache | None = None,
+    text_cache: CandidateTextCache | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    candidates, features = _candidate_features(data, config.candidates)
+    candidates, features = _candidate_features(data, config.candidates, feature_cache, text_cache)
     if features.empty:
         scores = pd.DataFrame(columns=("source1_entity_id", "candidate_entity_id", "score"))
     else:
@@ -124,6 +158,8 @@ def _inner_oof_threshold(
     n_splits: int,
     seed: int,
     context: str,
+    feature_cache: PairFeatureCache,
+    text_cache: CandidateTextCache,
 ) -> tuple[float, float, pd.DataFrame, pd.DataFrame]:
     """Tune a threshold using only OOF predictions within the supplied training partition."""
 
@@ -144,8 +180,8 @@ def _inner_oof_threshold(
         started = time.perf_counter()
         train = _partition_training(data, manifest, held_out_fold=fold, validation=False)
         valid = _partition_training(data, manifest, held_out_fold=fold, validation=True)
-        matcher, train_candidates, _ = _fit(train, config)
-        _, scores = _score(matcher, valid, config)
+        matcher, train_candidates, _ = _fit(train, config, feature_cache, text_cache)
+        _, scores = _score(matcher, valid, config, feature_cache, text_cache)
         scores.insert(0, "fold", fold)
         oof_parts.append(scores)
         LOGGER.info(
@@ -186,6 +222,10 @@ def cross_validate(
         n_splits=config.validation.n_outer_splits,
         seed=config.validation.seed,
     )
+    feature_cache = prepare_pair_feature_cache(data.source1, data.source2, data.source3)
+    text_cache = prepare_candidate_text_cache(
+        data.source1, data.source2, data.source3, config.candidates
+    )
     fold_reports: list[dict[str, Any]] = []
     pair_parts: list[pd.DataFrame] = []
     entity_rows: list[dict[str, Any]] = []
@@ -202,9 +242,11 @@ def cross_validate(
             n_splits=config.validation.n_inner_splits,
             seed=config.validation.seed + 10_000 + outer_fold,
             context=f"outer_fold={outer_fold}",
+            feature_cache=feature_cache,
+            text_cache=text_cache,
         )
-        matcher, train_candidate_count, _ = _fit(train, config)
-        valid_candidates, scores = _score(matcher, valid, config)
+        matcher, train_candidate_count, _ = _fit(train, config, feature_cache, text_cache)
+        valid_candidates, scores = _score(matcher, valid, config, feature_cache, text_cache)
         valid_truth = truth_mapping(valid.ground_truth)
         predictions = predictions_at_threshold(scores, valid_truth, threshold)
         fold_score = macro_entity_fbeta(predictions, valid_truth, beta=0.5)
@@ -298,6 +340,10 @@ def train_cv_ensemble(
         n_splits=config.validation.n_outer_splits,
         seed=config.validation.seed,
     )
+    feature_cache = prepare_pair_feature_cache(data.source1, data.source2, data.source3)
+    text_cache = prepare_candidate_text_cache(
+        data.source1, data.source2, data.source3, config.candidates
+    )
     matchers: list[PairMatcher] = []
     oof_parts: list[pd.DataFrame] = []
     fold_rows: list[dict[str, Any]] = []
@@ -305,8 +351,8 @@ def train_cv_ensemble(
         started = time.perf_counter()
         train = _partition_training(data, manifest, held_out_fold=fold, validation=False)
         valid = _partition_training(data, manifest, held_out_fold=fold, validation=True)
-        matcher, train_pairs, _ = _fit(train, config)
-        _, scores = _score(matcher, valid, config)
+        matcher, train_pairs, _ = _fit(train, config, feature_cache, text_cache)
+        _, scores = _score(matcher, valid, config, feature_cache, text_cache)
         scores.insert(0, "fold", fold)
         oof_parts.append(scores)
         matchers.append(matcher)
@@ -402,17 +448,31 @@ def predict_with_bundle(
     """Generate final candidates, average fold-model scores, and write both required TSVs."""
 
     started = time.perf_counter()
+    text_cache = prepare_candidate_text_cache(
+        test_data.source1,
+        test_data.source2,
+        test_data.source3,
+        bundle.config.candidates,
+    )
     candidates = generate_candidates(
         test_data.source1,
         test_data.source2,
         test_data.source3,
         bundle.config.candidates,
+        text_cache=text_cache,
+    )
+    feature_cache = prepare_pair_feature_cache(
+        test_data.source1,
+        test_data.source2,
+        test_data.source3,
     )
     features = build_pair_features(
         candidates,
         test_data.source1,
         test_data.source2,
         test_data.source3,
+        n_jobs=bundle.config.candidates.n_jobs,
+        cache=feature_cache,
     )
     if features.empty:
         averaged_scores = pd.DataFrame(
