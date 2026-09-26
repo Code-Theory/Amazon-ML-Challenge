@@ -1,0 +1,38 @@
+# Experiment 2 candidate: union of combined/name/address retrieval views with the linear matcher.
+# Values are hypotheses only until measured on the official data.
+
+[paths]
+data_root = "data"
+report_dir = "reports/multiview_logistic"
+artifact_dir = "artifacts/multiview_logistic"
+output_dir = "output"
+
+[candidate_generation]
+method = "multiview_char_tfidf"
+top_k_per_source = 30
+max_candidates_per_source = 90
+analyzer = "char_wb"
+ngram_min = 2
+ngram_max = 5
+min_df = 1
+max_features = 500000
+n_jobs = 1
+
+[validation]
+n_outer_splits = 5
+n_inner_splits = 4
+seed = 20260925
+metric = "macro_f0.5"
+
+[model]
+family = "logistic_regression"
+class_weight = "balanced"
+max_iter = 2000
+regularization_c = 1.0
+entity_balanced_weights = true
+
+[threshold_selection]
+strategy = "inner_oof_grid"
+minimum = 0.05
+maximum = 0.95
+steps = 181
