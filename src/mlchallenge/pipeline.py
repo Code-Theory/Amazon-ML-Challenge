@@ -37,6 +37,7 @@ from mlchallenge.metrics import (
     tune_threshold_from_oof,
 )
 from mlchallenge.modeling import PairMatcher, build_matcher, label_candidate_pairs
+from mlchallenge.progress import ProgressBar
 from mlchallenge.submission import write_submission_files
 
 LOGGER = logging.getLogger("mlchallenge")
@@ -99,6 +100,13 @@ def _candidate_features(
     text_cache: CandidateTextCache | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     started = time.perf_counter()
+    LOGGER.info(
+        "generating candidates method=%s source1=%d source2=%d source3=%d",
+        candidate_config.method,
+        len(data.source1),
+        len(data.source2),
+        len(data.source3),
+    )
     candidates = generate_candidates(
         data.source1,
         data.source2,
@@ -107,6 +115,7 @@ def _candidate_features(
         text_cache=text_cache,
     )
     candidate_seconds = time.perf_counter() - started
+    LOGGER.info("building pair features for %d candidate pairs", len(candidates))
     features = build_pair_features(
         candidates,
         data.source1,
@@ -176,6 +185,12 @@ def _inner_oof_threshold(
         seed=seed,
     )
     oof_parts: list[pd.DataFrame] = []
+    progress = ProgressBar(
+        f"{context} inner CV",
+        total=n_splits,
+        enabled=LOGGER.isEnabledFor(logging.INFO),
+    )
+    progress.start()
     for fold in range(n_splits):
         started = time.perf_counter()
         train = _partition_training(data, manifest, held_out_fold=fold, validation=False)
@@ -197,6 +212,7 @@ def _inner_oof_threshold(
             len(FEATURE_COLUMNS),
             time.perf_counter() - started,
         )
+        progress.update()
     oof = pd.concat(oof_parts, ignore_index=True)
     truth = truth_mapping(data.ground_truth)
     threshold, score, table = tune_threshold_from_oof(
@@ -222,14 +238,25 @@ def cross_validate(
         n_splits=config.validation.n_outer_splits,
         seed=config.validation.seed,
     )
+    cache_started = time.perf_counter()
+    LOGGER.info("preparing reusable normalized feature and retrieval caches")
     feature_cache = prepare_pair_feature_cache(data.source1, data.source2, data.source3)
     text_cache = prepare_candidate_text_cache(
         data.source1, data.source2, data.source3, config.candidates
+    )
+    LOGGER.info(
+        "prepared reusable caches duration_seconds=%.2f", time.perf_counter() - cache_started
     )
     fold_reports: list[dict[str, Any]] = []
     pair_parts: list[pd.DataFrame] = []
     entity_rows: list[dict[str, Any]] = []
 
+    progress = ProgressBar(
+        "Outer cross-validation",
+        total=config.validation.n_outer_splits,
+        enabled=LOGGER.isEnabledFor(logging.INFO),
+    )
+    progress.start()
     for outer_fold in range(config.validation.n_outer_splits):
         started = time.perf_counter()
         train = _partition_training(
@@ -300,6 +327,7 @@ def cross_validate(
             fold_score,
             duration,
         )
+        progress.update()
 
     fold_scores = np.asarray(
         [item["validation_macro_f0_5"] for item in fold_reports], dtype=np.float64
@@ -340,13 +368,24 @@ def train_cv_ensemble(
         n_splits=config.validation.n_outer_splits,
         seed=config.validation.seed,
     )
+    cache_started = time.perf_counter()
+    LOGGER.info("preparing reusable normalized feature and retrieval caches")
     feature_cache = prepare_pair_feature_cache(data.source1, data.source2, data.source3)
     text_cache = prepare_candidate_text_cache(
         data.source1, data.source2, data.source3, config.candidates
     )
+    LOGGER.info(
+        "prepared reusable caches duration_seconds=%.2f", time.perf_counter() - cache_started
+    )
     matchers: list[PairMatcher] = []
     oof_parts: list[pd.DataFrame] = []
     fold_rows: list[dict[str, Any]] = []
+    progress = ProgressBar(
+        "Training ensemble",
+        total=config.validation.n_outer_splits,
+        enabled=LOGGER.isEnabledFor(logging.INFO),
+    )
+    progress.start()
     for fold in range(config.validation.n_outer_splits):
         started = time.perf_counter()
         train = _partition_training(data, manifest, held_out_fold=fold, validation=False)
@@ -378,6 +417,7 @@ def train_cv_ensemble(
             len(FEATURE_COLUMNS),
             fold_rows[-1]["duration_seconds"],
         )
+        progress.update()
     oof = pd.concat(oof_parts, ignore_index=True)
     threshold, selection_score, threshold_table = tune_threshold_from_oof(
         oof,
@@ -448,12 +488,19 @@ def predict_with_bundle(
     """Generate final candidates, average fold-model scores, and write both required TSVs."""
 
     started = time.perf_counter()
+    progress = ProgressBar(
+        "Inference",
+        total=5,
+        enabled=LOGGER.isEnabledFor(logging.INFO),
+    )
+    progress.start()
     text_cache = prepare_candidate_text_cache(
         test_data.source1,
         test_data.source2,
         test_data.source3,
         bundle.config.candidates,
     )
+    progress.update()
     candidates = generate_candidates(
         test_data.source1,
         test_data.source2,
@@ -461,6 +508,7 @@ def predict_with_bundle(
         bundle.config.candidates,
         text_cache=text_cache,
     )
+    progress.update()
     feature_cache = prepare_pair_feature_cache(
         test_data.source1,
         test_data.source2,
@@ -474,6 +522,7 @@ def predict_with_bundle(
         n_jobs=bundle.config.candidates.n_jobs,
         cache=feature_cache,
     )
+    progress.update()
     if features.empty:
         averaged_scores = pd.DataFrame(
             columns=("source1_entity_id", "candidate_entity_id", "score")
@@ -491,6 +540,7 @@ def predict_with_bundle(
         )
     source1_ids = test_data.source1["entity_id"].astype(str).tolist()
     predictions = predictions_at_threshold(averaged_scores, source1_ids, bundle.threshold)
+    progress.update()
     candidate_mapping = {source1_id: set() for source1_id in source1_ids}
     for source1_id, group in candidates.groupby("source1_entity_id", sort=False):
         candidate_mapping[str(source1_id)] = set(group["candidate_entity_id"].astype(str))
@@ -500,6 +550,7 @@ def predict_with_bundle(
         candidate_mapping,
         output_dir,
     )
+    progress.update()
     return {
         "model": bundle.config.model.family,
         "ensemble_size": len(bundle.matchers),

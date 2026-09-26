@@ -240,18 +240,18 @@ def generate_candidates(
             if text_cache is not None
             else _text_views(targets, config.views)
         )
-        parts.extend(
-            _candidates_for_view(
-                source1,
-                targets,
-                query_text=query_views[view],
-                target_text=target_views[view],
-                target_source=target_source,
-                view=view,
-                config=config,
+        for view in config.views:
+            parts.append(
+                _candidates_for_view(
+                    source1,
+                    targets,
+                    query_text=query_views[view],
+                    target_text=target_views[view],
+                    target_source=target_source,
+                    view=view,
+                    config=config,
+                )
             )
-            for view in config.views
-        )
     result = pd.concat(parts, ignore_index=True)
     if result.empty:
         return pd.DataFrame(columns=CANDIDATE_COLUMNS)

@@ -204,6 +204,11 @@ logs the model, fold, train/validation Source 1 counts, pair counts, feature cou
 threshold, fold metric, and duration. The report contains fold mean/std and the overall OOF macro
 F0.5.
 
+Nested-CV, ensemble-training, and inference stages print progress snapshots with completed/total
+work, elapsed time, and estimated remaining time. Audit and candidate/feature construction print
+timed stage messages. Pass the global option `--log-level WARNING` before the command to hide this
+output in batch runs.
+
 `train` writes a joblib model bundle, readable JSON metadata, training OOF pair scores, and the
 threshold search table. Its OOF selection score is explicitly not a nested-CV estimate.
 
